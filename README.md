@@ -20,8 +20,6 @@ this workspace.
 | 8     | Baby PyTorch                     | cudarc       |
 | 9     | Reading PTX, naga, drivers       | —            |
 
-The full plan is in [`ROADMAP.txt`](ROADMAP.txt).
-
 Requires an NVIDIA GPU and the CUDA toolkit for stages 7–8.
 
 ## License
