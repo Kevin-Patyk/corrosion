@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["stage0-hello-buffer"]
+
+[workspace.dependencies]
+# The GPU API itself: a safe Rust implementation of the WebGPU standard.
+# Talks to the GPU through Vulkan/DX12/Metal and compiles our WGSL shaders.
+wgpu = "30"
+# A tiny async executor. wgpu's adapter/device requests are async fns;
+# pollster::block_on lets us call them from a plain main() without tokio.
+pollster = "0.4"
+# Safe casting between typed data and raw bytes (&[f32] <-> &[u8]).
+# GPU buffers only deal in bytes, so we need this for upload and readback.
+bytemuck = "1"
+
+# GPU code in debug mode is fine, but deps being unoptimized makes startup slow
+[profile.dev.package."*"]
+opt-level = 2
