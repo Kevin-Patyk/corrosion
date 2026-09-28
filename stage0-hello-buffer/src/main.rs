@@ -72,7 +72,7 @@
 //! ## What are we achieving in this file?
 //! 
 //! The smallest GPU program: take an array of f32 and double every element on the GPU. 
-//! The arithmetic is trivial on purpose. The poin is the plumbing, which every later stage reuses:
+//! The arithmetic is trivial on purpose. The point is the plumbing, which every later stage reuses:
 //! 
 //!     1. Instance -> Adapter -> Device + Queue (get a handle on the GPU)
 //!     2. Buffers (allocate GPU memory, upload)
@@ -82,7 +82,7 @@
 //!     6. Command encoder -> compute pass -> dispatch -> submit
 //!     7. Readback (copy to a mappable buffer, map it, read on the CPU)
 //! 
-//! Everything after this stager is a variation on these seven steps.
+//! Everything after this stage is a variation on these seven steps.
 //! 
 //! The round trip looks like this:
 //! 
@@ -148,6 +148,94 @@
 // of a future. We'll cover that when we get there.
 // ---------------------------------------------------------------------------
 
+use wgpu::RequestAdapterOptions;
+use wgpu::DeviceDescriptor;
+use wgpu::InstanceDescriptor;
+use wgpu::InstanceFlags;
+use wgpu::Instance;
+
 fn main() {
-    println!("Hello, world!");
+    // `run` is an async function, so calling it doesn't run anything yet:
+    // it just hands back the "box" (the future) described above.
+    // `pollster::block_on` is the executor: it sits on this thread, keeps pushing
+    // the future forward, and returns once the box is filled.
+    pollster::block_on(run());
+}
+
+async fn run() {
+    // Step 1: Instance -> Adapter -> Device + Queue -----
+
+    // As a note, in wgpu adapter = hardware (like device in CUDA)
+
+    // The instance is wgpu's entry point: "the phone book". Creating it loads
+    // nothing heavy; it only prepares to ask the OS which graphics APIs (Vulkan, DX12, Metal, OpenGL)
+    // are available here. This is the first thing you create when using wgpu.
+    //
+    // `Default` enables every backend wgpu was built with, and lets wgpu pick. On an NVIDIA card
+    // under Linux or Windows it will normally choose Vulkan.
+    //
+    // Since we are using WSL, this needs to be modified since there is no native
+    // NVIDIA Vulkan driver.
+    // The GPU is reached through Mesa's "Dozen", which translates Vulkan into
+    // DirectX 12 and passes it to the Windows driver. 
+    let mut instance_desc = InstanceDescriptor::new_without_display_handle();
+    instance_desc.flags |= InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+    let instance = Instance::new(instance_desc);
+
+    // Ask the phone book for one GPU. This is async (see the note about):
+    // the driver may need to wake the hardware before it can answer.
+    //
+    // It returns a Result because the answer can be "no suitable GPU".
+    // `.expect(...)` means: "it it's an error, stop the program with this message."
+    // Fine for learning a program; a real app would handle it.
+    let adapter = instance.request_adapter(&RequestAdapterOptions {
+        // "Give me the fast discrete GPU, not the power-saving built-in one."
+        // Irrelevant on a single GPU desktop.
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        // Every other option keeps its default: no window to draw into
+        // (we're compute only) and no software fallback GPU
+        ..Default::default()
+    }).await.expect("no suitable GPU adapter found");
+
+    // The adapter can describe itself before we connect to it. 
+    // Printing this is our first proof that wgpu found the NVIDIA card, and which
+    // backend (graphics API) it's using to talk to it.
+    let info = adapter.get_info();
+    println!("Adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+
+    // Open the connection. We get back 2 things at once:
+    // - device: used to CREATE resources (buffers, shaders, pipelines)
+    // - queue: used to SEND work to the GPU (submit, upload data)
+    //
+    // The descriptor lets use request optional features and larger limits
+    // than the defaults. Stage 0 needs none of that, so every field stays at its default.
+    // The label shows up in error messages and in debugging tools, which helps
+    // once there are many objects around.
+
+    // The adapter represents the phyiscal or virtual hardware (GPU) itself, while a device
+    // represents an active connection or session to that hardware.
+    let (device, queue) = adapter.request_device(&DeviceDescriptor {
+        label: Some("stage0 device"),
+        ..Default::default()
+    })
+    .await
+    .expect("failed to create device");
+
+    // From here, no more async: everything we do with `device` and `queue`
+    // is an ordinary function call. Steps 2-7 go below.
+
+    // Silence "unused variable" warnings until step 2 uses these.
+    let _ = (&device, &queue);
+
+    // Step 2: Buffers -----
+    // 
+    // A buffer is a block of GPU memory: a size in bytes plus a list of usage flags declaring
+    // what it will be used for. The flags aren't a formality. The driver uses them to decide where to put
+    // the buffer and wgpu's validation uses them to stop you misusing it.
+    //
+    // A buffer is a linear block of memory allocated on the GPU used to store raw, untyped bytes. 
+    // - Contiguous memory: all data inside a buffer is stored sequentially in a continuous block.
+    // - Untyped bytes: wgpu does not know or care what the data means; it is up to your application to interpret them,
+    // - Usage flags: when you create a buffer, you must specify how it will be used (such as for vertex data, uniform data, or copying),
+    
 }
