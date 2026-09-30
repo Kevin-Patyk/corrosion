@@ -1,0 +1,9 @@
+[package]
+name = "stage0-vec-add"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cuda-device.workspace = true
+cuda-host.workspace = true
+cuda-core.workspace = true
