@@ -153,6 +153,12 @@ use wgpu::DeviceDescriptor;
 use wgpu::InstanceDescriptor;
 use wgpu::InstanceFlags;
 use wgpu::Instance;
+// `DeviceExt` adds helper methods to `wgpu::Device`, including
+// `create_buffer_init` (allocate a buffer AND fill it in one call).
+// Rust only lets us call a trait's methods if the trait is in scope.
+use wgpu::util::DeviceExt;
+use wgpu::util::BufferInitDescriptor;
+use wgpu::BufferDescriptor;
 
 fn main() {
     // `run` is an async function, so calling it doesn't run anything yet:
@@ -237,5 +243,58 @@ async fn run() {
     // - Contiguous memory: all data inside a buffer is stored sequentially in a continuous block.
     // - Untyped bytes: wgpu does not know or care what the data means; it is up to your application to interpret them,
     // - Usage flags: when you create a buffer, you must specify how it will be used (such as for vertex data, uniform data, or copying),
+
+    // We are going to allocate GPU memory and upload the input
+    //
+    //The data to double: 0.0, 1.0, 2.0, ..., 999.0
+    // Why 1000? Our shader (kernel) will run in groups of 64 copies. 1000 isn't a multiple of 64
+    // so we'll need 16 groups = 1024 copies, and the last 24 have no element to work on. That's 
+    // the bounds check from PMPP ch. 2 (`if (i < n)`) and picking an awkward size on purpose means
+    // our shader (kernel) MUST handle it correctly or we'll see it go wrong.
+    let input: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+
+    // Buffers are measured in BYTES, not elements. Each f32 is 4 bytes, so 1000 floats = 4000 bytes.
+    // Computing this once, with a name, avoids the classic bug of passing an element count where bytes were expected.
+    //
+    // `wgpu::BufferAddress` is wgpu's name for u64 (a byte count on the GPU).
+    // `as` converts our usize into it.
+    let size_in_bytes = (input.len() * std::mem::size_of::<f32>()) as wgpu::BufferAddress; 
+
+    // INPUT BUFFER: allocated AND filled in one call.
+    // CUDA equivalent: cudaMalloc + cudaMemcopy (host -> device)
+    //
+    // The GPU only understands bytes, so `bytemuch::cast_slice` lets us view our
+    // &[f32] as &[u8]. No copy is made: it's the same memory, looked at as bytes.
+    // This is only allowed because f32 is "plain old data": any bit pattern is a valid
+    // value and there are no hidden pointers inside
+    //
+    // Usage STORAGE: "a shader (kernel) may read (and write) this buffer."
+    let _input_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("input"),
+        contents: bytemuck::cast_slice(&input),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    // OUTPUT BUFFER: allocated empty. wgpu guarantees it starts as all
+    // zeros (CUDA's cudaMalloc gives you leftover garbage instead).
+    // CUDA equivalent: cudaMalloc for the result array.
+    //
+    // Usage flags are bits, combined with `|` ("this AND that"):
+    // STORAGE: The shader writes results here
+    // COPY_SRC: afterwards, we copy FROM it into the staging buffer
+    //
+    // `mapped_at_creation: false` means "don't make it CPU readable at
+    // creation time". We'd only set that to fill the buffer by hand.
+    let _output_buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("output"),
+        size: size_in_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    // STAGING BUFFER: the pickup point for results coming back
+    // CUDA equivalent: none, cudaMemcpy (device -> host) hides this step.
+    //
+    // The output buffer lives in fast VRAM
     
 }
