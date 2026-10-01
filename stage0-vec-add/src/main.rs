@@ -107,6 +107,71 @@
 //! time. Stage 5 is the clearest example: the particle positions stay on the GPU for
 //! thousands of steps, and only occasional snapshots come back to be saved as PNG frames.
 
+// Imports -----
+//
+// cuda_core is the HOST side: everything the CPU does to drive the GPU (open a session, 
+// make boxes, launch, copy back). More imports join this list as we need them.
+use cuda_core::{CudaContext, DeviceBuffer};
+
+// How many numbers we add. Deliberately not a multiple of 256 (the block size we 
+// will launch with), so the last block has leftover threads with nothing to do,
+// and the bounds check in the kernel actually matters.
+const N: usize = 1000;
+
+
 fn main() {
-    println!("Hello, world!");
+    println!("=== Stage 0 - Vector Addition === \n");
+
+    // Connect: Open a session with the GPU + get its queue -----
+    //  
+    // Open a session ("context") with GPU number 0, the first (and here only)
+    // GPU in the machine. In CUDA's vocabulary, the physical GPU is the "device"; the context
+    // is our session with it. Every body and loaded kernel we create from now on belongs to this session
+    // and its cleaned up when it ends.
+    //
+    // This can fail (No NVIDIA GPU, driver problem), so it returns a Result.
+    // For a learning project, we just stop with a message.
+    let ctx = CudaContext::new(0).expect("Failed to open a session with GPU 0");
+  
+    // Get the session's ready-made queue ("stream"). Every GPU job we hand over
+    // (fill a box, run the kernel, copy back) goes in the queue, and the GPU does them
+    // one at a time, strictly in the order given.
+    //
+    // Arc detail: an Arc is a pointer to ONE shared object plus a counter.
+    // Cloning the Arc makes another pointer (count + 1), never a copy of the
+    // object. default_stream takes `self: &Arc<Self>` (our ctx pointer, not the base context)
+    // so that `self.clone()` can make a second pointer, which the stream stores in its field.
+    // Now, the session stays alive for as long as the stream exists; the stream can never 
+    // outlive the session.
+    // counts now: session = 2 (ctx + the stream's), stream = 1.
+    let stream = ctx.default_stream();
+
+    // Arc = atomic reference count
+    // Atomic: an operation that happens all at once, as one indivisible step. Other 
+    // threads see it either not started or fully finished, never half-done.
+    // Even "add 1 to the count" is secretly 3 steps: read the value, add 1, write it back
+    // If 2 threads do this at once without atomics, there could be a data race
+    // An atomic does all 3 steps at once and another thread has to wait its turn
+
+    // `ctx` and `stream` are wrapped in Arc because everything we create later (boxes of GPU memory, the loaded 
+    // kernel, the queue itself) only make sense while the session is still open. So each of those quietly holds its own 
+    // Arc of what it depends on and the session stays alive until the LAST thing using it is gone, 
+    // in whatever order our variables are dropped. That makes "box outlives its session" impossible without
+    // lifetime annotations everywhere. This is true since `DeviceBuffer` contains its own `Arc<CudaContext>` as well.
+    // Arc rather than Rc becayse a session can be used from several CPU
+    // thrreads, and Arc keeps its counter correct when that happens.
+
+    // Part 1: Set Up -----
+    //
+    // The input data, in ordinary CPU memory (plain Vecs, No GPU yet).
+    // a[i] = i and b[i] = 2i, so every answer should be c[i] = 3i,
+    // easy to check by eye.
+    // Note, you don't need .iter() here since `Range` itself is an iterator,
+    // not a collection like a Vec
+    let a_host: Vec<f32> = (0..N).map(|i| i as f32).collect();
+    let b_host: Vec<f32> = (0..N).map(|i| (2 * i) as f32).collect();
+    
+    println!("Inputs first (5):");
+    println!("  a = {:?}", &a_host[0..5]);
+    println!("  b = {:?}", &b_host[0..5]);
 }
