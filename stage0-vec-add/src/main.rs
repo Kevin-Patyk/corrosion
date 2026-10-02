@@ -113,6 +113,10 @@
 // make boxes, launch, copy back). More imports join this list as we need them.
 use cuda_core::{CudaContext, DeviceBuffer};
 
+// cuda_device is the GPU side: what kernel code can use (thread indices, 
+// DisjointSlice) plus the two macros that mark kernels and bundle them.
+use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
+
 // How many numbers we add. Deliberately not a multiple of 256 (the block size we 
 // will launch with), so the last block has leftover threads with nothing to do,
 // and the bounds check in the kernel actually matters.
@@ -131,11 +135,13 @@ fn main() {
     //
     // This can fail (No NVIDIA GPU, driver problem), so it returns a Result.
     // For a learning project, we just stop with a message.
+    // Starts the driver, picks GPU number 0, opens the session, and returns it in an Arc.
     let ctx = CudaContext::new(0).expect("Failed to open a session with GPU 0");
   
     // Get the session's ready-made queue ("stream"). Every GPU job we hand over
     // (fill a box, run the kernel, copy back) goes in the queue, and the GPU does them
     // one at a time, strictly in the order given.
+    // The queue only holds the job, never the data
     //
     // Arc detail: an Arc is a pointer to ONE shared object plus a counter.
     // Cloning the Arc makes another pointer (count + 1), never a copy of the
@@ -174,4 +180,138 @@ fn main() {
     println!("Inputs first (5):");
     println!("  a = {:?}", &a_host[0..5]);
     println!("  b = {:?}", &b_host[0..5]);
+
+    // Boxes of GPU Memory ("device buffers") -----
+    //
+    // A DeviceBuffer is a fixed-size box of GPU memory holding one type (here f32).
+    // Dropping it frees the GPU memory, just like a Vec.
+    // Each box also holds its own Arc of the session (ctx), so a bax can never outlive its session
+    // (session count: 2 -> 5 after these 3).
+    //
+    // Naming: `_host` = CPU memory, `_dev` = GPU memory. They're separate:
+    // the GPU can't read a_host, the CPU can't read a_dev.
+
+    // from_host: reserve a box the size of the vec, put "copy the Vec into it"
+    // in the queue, then WAIT until that copy is done. It has to wait:
+    // it only borrows a_host for this call, and once the call returns we'd be free to change
+    // or drop a_host. a_host stays on the CPU unchanged.
+    // Here, we are allocating memory on the GPU and filling it with data from a_host and b_host
+    // What from_host does:
+    // 1. Reserves a box in GPU memory for the data
+    // 2. Puts a job in the stream saying "copy a_host into that box"
+    // 3. Waits until the GPU has done the job
+    let a_dev = DeviceBuffer::from_host(&stream, &a_host).expect("Failed to make box a on the GPU");
+    let b_dev = DeviceBuffer::from_host(&stream, &b_host).expect("Failed to make box b on the GPU");
+
+    // zeroed: reserve a box for N numbers and queue "fill with zeros".
+    // Unlike from_host it does NOT wait: there's no CPU data to protect.
+    // No data to copy in, so Rust can't guess the type, ::<f32> tells it.
+    // Why zero? Safe Rust never hands out memory with leftover garbage,
+    // and if the kernel ever skipped an element, we would see 0.0, not junk.
+    // (Not `mut` yet: it gets `mut` when the launch needs to write to it).
+    // Here, we are allocating memory which will eventually store the result.
+    // Rather than it being empty, we are just allocating zeros.
+    let c_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to make box c on the GPU");
+
+    // Can't look inside the boxes from the CPU; that needs the copy back (Part 3).
+    // Getting here without an expect firing means they exist
+    println!(
+        "\nMade 3 boxes on the GPU, {} bytes each", // f32 = 4 bytes
+        N * std::mem::size_of::<f32>()
+    );
+
+    // The Kernel: The recipe (code) each GPU thread runs, compiled at BUILD time
+    //
+    // #[cuda_module] marks a module holding kernels. At build time it:
+    // - compiles every #[kernel] inside the GPU code and pack it into our program 
+    //      (the "one program, recipe packed inside" from our diagram)
+    // - generates kernels::load(&ctx), which hands that packed code to the GPU driver
+    //     at runtime (used at the end of Part 1 below);
+    // - generates a typed launch method per kernel (module.vecadd(...)),
+    //      checked by the compiler like any Rust call (used in Part 2)
+
+    // We can have several kernels in one mod kernels
+    // The macro's documentation says its generates one launch method per `#[kernel]`
+    // A single kernels::load(&ctx) loads them all at once, and you launch whichever you
+    #[cuda_module]
+    mod kernels {
+        use super::*; // brings the imports above into this module
+
+        // #[kernel] = CUDA C++'s __global__: a function the CPU launches and
+        // thousands of GPU threads run at once. Every thread runs this SAME
+        // code; the only difference between them is their seat number.
+        //
+        // How many threads? The kernel never says. The CPU picks that at
+        // launch (Part 2): LaunchConfig::for_num_elems(1000) gives blocks of
+        // 256 threads (fixed) and 1000 / 256 = 3.9, rounded up to 4 blocks.
+        // So 4 x 256 = 1024 threads, 24 more than we have elements:
+        //
+        //      block 0          block 1          block 2          block 3
+        //   [0 ... 255]      [0 ... 255]      [0 ... 255]      [0 ... 255]
+        //   seats 0-255      seats 256-511    seats 512-767    seats 768-1023
+        //                                                      (1000-1023 idle)
+        //
+        // Parameters (at launch, the CPU passes boxes of GPU memory for them):
+        //   a, b: &[f32]   read-only inputs. Slices carry their length, so no
+        //                  separate "n" parameter like in PMPP.
+        //   c: DisjointSlice<f32>   the output. Rust normally allows only ONE
+        //                  writer to a slice at a time (&mut [f32]), but here
+        //                  1024 threads write at once. DisjointSlice allows it
+        //                  with one rule: each thread may only write the ONE
+        //                  element at its own seat number. No two threads touch
+        //                  the same element ("disjoint" = no overlap), so they
+        //                  can't interfere. Inside it's just like a slice
+        //                  (start + length); only the way you access it is
+        //                  restricted, via get_mut(idx) below. `mut` because
+        //                  get_mut needs to change it.
+        //
+        #[kernel]
+        pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+            // This thread's seat number. The GPU gives each thread its block
+            // number and its position in the block; index_1d combines them:
+            //     seat = block number * 256 + position in block
+            //     e.g. block 3, position 231 -> 3 * 256 + 231 = 999
+            //
+            // "1d" because our data is one flat row, so one number per thread
+            // is enough. Images and matrices (Stages 1, 6) use index_2d (row +
+            // column). The LAUNCH must match: index_1d checks the launch is
+            // 1D, and for_num_elems always makes one. If it weren't, the index
+            // would be marked invalid and get_mut would return None.
+            //
+            // It comes back wrapped in a ThreadIndex type (for seat 999 it's
+            // essentially "999, valid"). Why not a plain number? get_mut only
+            // accepts a ThreadIndex, and index_1d is the only way to get one.
+            // If get_mut took a plain usize, we could write c.get_mut(5) and
+            // all 1024 threads would write c[5] at once: the exact collision
+            // DisjointSlice exists to prevent.
+
+            // We are essentially just taking the blocks with threads and flattening it into a 1d
+            // object so that we don't need to refer to the indices by (block number, thread index in block), 
+            // such as (0, 234) - Block 0, thead number 234,
+            // and we can just say "element i" instead.
+            // The flattening hides that grouping from the code that handles the data.
+            let idx = thread::index_1d();
+            
+            // .get() unwraps it to a plain usize, for ordinary indexing of a,b.
+            // Converts it from a ThreadIndex to as usize, the ordingary number type Rust uses for indexing
+            let i = idx.get();
+            
+            // get_mut IS the bounds check (PMPP's `if (i < n`): Some for seats 0..999
+            //, None for the 24 idle seats 1000...1023, which then do nothing.
+            // Impossible to forget.
+            // We are using if let Some() because get_mut returns an Option
+            // if let handles both cases in one line:
+            // if its some, we run the thread's element
+            // if its None, it skips the block, thread does nothing
+            // Would be the same as: `match c.get_mut(idx) { Some(c_elem) = > do something, None => {}}`
+            // get_mut is called on c (the output) with the thread index - it hands back that threads element or None if it is past the end
+            if let Some(c_elem) = c.get_mut(idx) {
+                // a[i] and b[i] are normal bounds-checked Rust reads. They're 
+                // in range because i < c's length and all three boxes hold N.
+                // If a were shorter, the read would panic on the GPU that
+                // stops the kernel and shows up as an error at the next wait.
+                *c_elem = a[i] + b[i];
+            }
+        }
+    }
 }
