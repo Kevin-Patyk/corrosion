@@ -38,3 +38,8 @@ Thumbs.db
 
 # --- Env ---
 .env
+
+# --- cuda-oxide build outputs ---
+.oxide-artifacts/
+/*.ll
+/*.ptx
