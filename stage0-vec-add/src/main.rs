@@ -113,12 +113,14 @@
 // make boxes, launch, copy back). More imports join this list as we need them.
 use cuda_core::{CudaContext, DeviceBuffer};
 
-// cuda_device is the GPU side: what kernel code can use (thread indices, 
-// DisjointSlice) plus the two macros that mark kernels and bundle them.
-use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
+// cuda_device is the GPU side: what kernel code can use (thread indices,
+// DisjointSlice) plus the two macros that mark kernels bundle them, and
+// declar their launch shape.
+use cuda_device::{DisjointSlice, cuda_module, kernel, launch_bounds, launch_contract, thread};
 
 // LaunchConfig: the launch numbers (how many blocks, threads per block).
-use cuda_core::simt::LaunchConfig;
+// use cuda_core::simt::LaunchConfig; - this is for a raw launch, which is unused
+use cuda_core::LaunchConfig1D;
 
 // How many numbers we add. Deliberately not a multiple of 256 (the block size we 
 // will launch with), so the last block has leftover threads with nothing to do,
@@ -134,6 +136,25 @@ const N: usize = 1000;
 //     at runtime (used at the end of Part 1 below);
 // - generates a typed launch method per kernel (module.vecadd(...)),
 //      checked by the compiler like any Rust call (used in Part 2)
+
+// Learning this procedure is dense, especially at this early stage
+// since we are introducing a lot of new concepts. 
+// But if you strip away the detail, and everything we did today rests on five ideas:
+// 1. Two separate memorys. Data has to be copied to the GPU and back.
+// 2. A queue. The CPU adds jobs and moves on; the GPU works through them in order.
+//      The CPU only waits when it needs something finished.
+// 3. One function, thousands of copies. A kernel is the work for one element, and every thread runs it.
+// 4. Indexing. Each thread works out which element is its own.
+// 5. Launch shape. The CPU decies how many threads, grouped in blocks, cover the data.
+
+// From a high-level perspective, the procedure is:
+// 1. context      open a session with the GPU
+// 2. stream       get its queue
+// 3. set up       make + fill the boxes, load the kernels
+// 4. prepare      check the launch numbers against the contract
+// 5. launch       queue the kernel (CPU doesn't wait)
+// 6. copy back    get the result (CPU waits for kernel + copy)
+// 7. check        compare with the CPU's answer
 
 // We can have several kernels in one mod kernels
 // The macro's documentation says its generates one launch method per `#[kernel]`
@@ -169,8 +190,29 @@ mod kernels {
     //                  (start + length); only the way you access it is
     //                  restricted, via get_mut(idx) below. `mut` because
     //                  get_mut needs to change it.
+    
+
+    // The launch contract (for the prepared launch) 
+    // 
+    // The raw launch needed us to PROMISE (in an unsafe block) that the launch shape
+    // fits this kernel. Instead, we now WRITE DOWN the shape the kernel needs, right on the kernel,
+    // and the library checks every launch against it:
     //
+    // #[launch_bounds(256)] at most 256 threads per block. A hint for the compiler,
+    // so it can plan how many registers each thread gets. Every official cuda-oxide example
+    // pairs it with the contract below, and the macro refuses a contract block bigger than this number.
+    //
+    // #[launch_contract(domain = 1, block = (256, 1, 1))] 
+    // domain = 1: a 1D launch, matching index_1d.
+    // block = (256, 1, 1): exactly 256 threads per block, no more, no less.
+    // (How MANY blocks is still the CPU's choice).
+    //
+    // With the contract in place, #[cuda_module] generates 
+    // module.prepare_vecadd(...), which checks a launch against it and a
+    // module.vecadd(...) that needs no unsafe.
     #[kernel]
+    #[launch_bounds(256)]
+    #[launch_contract(domain = 1, block = (256, 1, 1))]
     pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
         // This thread's seat number. The GPU gives each thread its block
         // number and its position in the block; index_1d combines them:
@@ -342,11 +384,26 @@ fn main() {
     // inside our program and hands it to the driver, which gets it ready to run on THIS card.
     // Like the boxes, the loaded module belongs to the session.
     // Happens once; the module is reused for every launch.
-    let module = kernels::load(&ctx).expect("Failed to load the kernel");
+    let module = unsafe { kernels::load(&ctx) }.expect("Failed to load the kernel");
     // The kernel itself never mentions ctx: its just a recipe, compiled before any session exists.
     // THIS line above ties it to our session: it loads the GPU code into CTX, and the returned module
     // holds its own Arc of ctx (like the stream and the boxes), so it belongs to, and keeps alive,
     // this session.
+
+    // kernels::load finds the GPU code packed inside your program, by its label.
+
+    // With a launch contract, the unsafe step MOVES here, from the launch to the load.
+    // The contract is only trustworthy if the GPU code we load really was compiled from this kernel's
+    // module; the library can't fully prove that from a name alone. In a single-file project like ours
+    // it's always true.
+    // The promise is basically saying: "I checked there's no other GPU code in this package that could be mistaken for ours."
+    // "This package's only GPU code comes from `kernels` in this file."
+    //
+    // An example of SAFETY being violated is if we have similar GPU kernels, like vecadd, with different
+    // launch bounds and launch contracts in a different place, think a library and a program in the same package.
+    //
+    // SAFETY: this package's embedded GPU code was compiled from the `kernels`
+    // module in this file.
 
     println!("Kernel loaded.");
 
@@ -372,11 +429,7 @@ fn main() {
     // Shortcut: LaunchConfig::for_num_elems(N as U32) gives the same result
     // (256 threads per block, blocks rounded up, no shared memory). We write it out
     // by hand here so the numbers are visible
-    let config = LaunchConfig {
-        grid_dim: (blocks, 1, 1), // how many blocks
-        block_dim: (THREADS_PER_BLOCK, 1, 1), // how many threads per block
-        shared_mem_bytes: 0,
-    };
+    let config = LaunchConfig1D::new(blocks, THREADS_PER_BLOCK, 0);
 
     println!(
         "\nLaunching {} blocks x {} threads = {} threads for {} elements.",
@@ -386,7 +439,31 @@ fn main() {
         N,
     );
 
-    // The raw launch ---
+    // Prepare: the library checks the launch -----
+    //
+    // prepare_vecadd (generated from the contract) checks this launch against what the kernel
+    // declared AND against this GPU's limits: the exact block shape (256 threads), shared memory,
+    // and more. If anything doesn't fit, it returns an Err here, on the CPU, BEFORE anything reaches the GPU.
+    //
+    // THREADS_PER_BLOCK (here) and block = (256, 1, 1) (on the kernel) must match.
+    // If you changed one and not the other, this line would catch it instead of launching a broken kernel.
+    //
+    // The result is a "prepared launch": proof that this exact launch was checked for vecadd.
+    // It can only be used with vecadd and can be reused for every later vecadd launch with the same numbers.
+    let prepared = module.prepare_vecadd(config).expect("Launch numbers don't fit this kernel's contract");
+
+    // The prepared launch: no unsafe -----
+    //
+    // Same as before: the compiler checks the arguments (box types), the kernel
+    // is only QUEUED, and errors while running show up at the next wait. The difference:
+    // no promise needed because `prepared` proves the shape fits.
+    module.vecadd(&stream, &prepared, &a_dev, &b_dev, &mut c_dev).expect("Failed to queue the kernel");
+
+    // Launching: module.vecadd hands the kernel, the launch shape, and our boxes 
+    // to the driver, which puts a "run this kernel" job in the queue and returns at once.
+    // The GPU runs it when the job's turn comes.
+
+    // The raw launch (unused) ---
     //
     // module.vecadd was generated by #[cuda_module]. The compiler checks the
     // ARGUMENTS against the kernel's parameters:
@@ -413,9 +490,25 @@ fn main() {
     // - a_dev, b_dev, and c_dev all hold N elements, so every seat that get_mut
     //   lets through (i < c's length) is also in range for a, b.
     // - The kernel uses no shared memory, and we request none.
-    unsafe { module.vecadd(&stream, config, &a_dev, &b_dev, &mut c_dev) }.expect("Failed to queue the kernel");
+        // unsafe { module.vecadd(&stream, config, &a_dev, &b_dev, &mut c_dev) }.expect("Failed to queue the kernel");
 
     println!("Kernel queued (it may still be running).");
+
+    // RAW vs PREPARED LAUNCH
+    //
+    //                  RAW (first version)          PREPARED (this version)
+    // launch shape     we promise it fits           declared on the kernel,
+    //                  (unsafe launch)              checked by prepare_...
+    // launch numbers   LaunchConfig: x, y, z        LaunchConfig1D: x only
+    //                  (y, z can be wrong)          (y, z can't exist)
+    // unsafe at        the launch                   the load (GPU code must
+    //                                               come from this module)
+    // wrong shape      kernel runs wrongly or       Err from prepare_vecadd,
+    //                  does nothing, found late     on the CPU, before launch
+    // speed            same                         same
+    //
+    // Rule of thumb: the prepared launch from Stage 1 on. The raw launch
+    // is the escape hatch (for kernels without a contract).
 
     // Part 3: Get the Result Back - waits for the queue to finish -----
 
