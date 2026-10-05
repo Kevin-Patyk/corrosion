@@ -19,8 +19,9 @@
 //!
 //! Bandwidth: how many bytes per second can move between the memory and the cores, measured
 //! in GB/s. System RAM manages roughly 50-100 GB/s; VRAM on a modern NVIDIA card manages
-//! 500-1000+. Doubling a million floats is 4 MB in and 4 MB out and almost no arithmetic,
-//! so the time it takes is set by bandwidth, not the core count.
+//! 500-1000+. Adding two arrays of a million floats is 8 MB in (two inputs) and 4 MB out
+//! (one result) and almost no arithmetic, so the time it takes is set by bandwidth, not the
+//! core count.
 //!
 //! ## Why are we using it?
 //!
@@ -75,19 +76,33 @@
 //!       kernel has finished.
 //!     - A kernel's errors can show up later, at the next sync, not at the launch line.
 //!
-//! TODO: name the cuda-oxide calls for each of these once we've read the vecadd example.
+//! In cuda-oxide:
+//!     - The stream:  `ctx.default_stream()`, the session's ready-made queue.
+//!     - Launch:      `module.vecadd(&stream, &prepared, ...)` queues the kernel and
+//!                    returns at once. `DeviceBuffer::zeroed` also only queues its work.
+//!     - Sync:        `c_dev.to_host_vec(&stream)` queues the copy back, then waits for
+//!                    the stream to finish. `DeviceBuffer::from_host` also waits, but only
+//!                    for its own copy in.
 //!
 //! ## What are we achieving in this file?
 //!
-//! The smallest GPU program: take an array of f32 and double every element on the GPU.
-//! The arithmetic is trivial on purpose. The point is the plumbing, which every later
-//! stage reuses. It follows PMPP chapter 2's three parts:
+//! The smallest GPU program: take two arrays of f32 and add them element by element on
+//! the GPU. The arithmetic is trivial on purpose. The point is the plumbing, which every
+//! later stage reuses. It follows PMPP chapter 2's three parts:
 //!
-//!     Part 1: context + stream, allocate GPU memory, copy the input over
+//!     Part 1: context + stream, allocate GPU memory, copy the inputs over
 //!     Part 2: write the kernel, pick a launch configuration (blocks x threads), launch
 //!     Part 3: copy the result back (which waits for the kernel), check it
 //!
-//! TODO: fill in the cuda-oxide names for each part after reading vecadd.
+//! In cuda-oxide:
+//!     Part 1: `CudaContext::new(0)` + `ctx.default_stream()`,
+//!             `DeviceBuffer::from_host` (a, b) + `DeviceBuffer::zeroed` (c),
+//!             `kernels::load(&ctx)` (the kernel is packed in at build time)
+//!     Part 2: `#[kernel] fn vecadd` inside `#[cuda_module] mod kernels`,
+//!             `LaunchConfig1D::new(blocks, 256, 0)`,
+//!             `module.prepare_vecadd(config)` (checks it against the kernel's
+//!             `#[launch_contract]`), then `module.vecadd(...)`
+//!     Part 3: `c_dev.to_host_vec(&stream)`, then compare with the CPU's a[i] + b[i]
 //!
 //! Compared with the wgpu version (archived at tag `wgpu-archive`), CUDA hides three of
 //! its seven steps: there are no bind groups (you pass buffers to the kernel like normal
@@ -96,14 +111,14 @@
 //!
 //! The round trip looks like this:
 //!
-//!   CPU array --copy--> GPU buffer --kernel--> GPU buffer --copy--> CPU array
-//!                                  (parallel)
+//!   CPU arrays a, b --copy--> GPU buffers a, b --kernel--> GPU buffer c --copy--> CPU array c
+//!                                             (parallel)
 //!
 //! NOTE: these two copies are where GPU programming stops being free.
-//! Doubling six numbers on the GPU is far slower than doing it on the CPU, because the
-//! copies and the setup cost more than the arithmetic. The GPU only wins once the work in
-//! the middle is big enough to pay for the transfers, which is why the later stages care so
-//! much about keeping data on the GPU between kernels instead of round-tripping it every
+//! Adding a handful of numbers on the GPU is far slower than doing it on the CPU, because
+//! the copies and the setup cost more than the arithmetic. The GPU only wins once the work
+//! in the middle is big enough to pay for the transfers, which is why the later stages care
+//! so much about keeping data on the GPU between kernels instead of round-tripping it every
 //! time. Stage 5 is the clearest example: the particle positions stay on the GPU for
 //! thousands of steps, and only occasional snapshots come back to be saved as PNG frames.
 
