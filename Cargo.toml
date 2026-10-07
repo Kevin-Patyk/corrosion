@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["stage0-vec-add"]
+members = ["stage0-vec-add", "stage1-matmul"]
 
 [workspace.dependencies]
 # Device side: what kernels can use (thread indexing, DisjointSlice, #[kernel]).
@@ -9,3 +9,4 @@ cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
 cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
 # Host-side CUDA runtime: context, stream, DeviceBuffer, LaunchConfig.
 cuda-core = "0.3.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
