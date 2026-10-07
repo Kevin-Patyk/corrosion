@@ -26,7 +26,7 @@
 //! Memory is one long line; it has no rows. Matrices are stored ROW-MAJOR:
 //! row 0, then row 1, and so on. Element (row, col) is at
 //! 
-//! index = row * N + col
+//! index = row * WIDTH + col
 //! 
 //! The numbers are the formula are "strides": how far to jump in memory for one step
 //! in each direction. Row-major: column stride 1, row stride N. Column-major swaps them.
@@ -45,6 +45,23 @@
 //!     row = block.y * block height + position.y (y runs across)
 //! 
 //! x is the COLUMN, y is the ROW (CUDA and PMPP's convention).
+//! 
+//! Each thread does 2 steps, in order: 
+//! 
+//!     1. Mapping: which element in the matrix is my job? -> (row, col)
+//!     2. Linearizing: where does the element live in memory? -> row * width * col
+//! 
+//! Mapping happens once: the thread turns its block and position numbers into the element it's
+//! responsible for. But memory has no rows; it only understands one position number.
+//! So every time the thread reads or writes an element (its own C element and each A and B element 
+//! in the loop), it linearizings (row, col) into that number. The matrix is already stored flat,
+//! linearizing just finds the element's spot in the line.
+//! 
+//! In Stage 0 both collapsed into index_1d: the data was already flat, so 
+//! seat = element = memory index. In 2D they come apart.
+//! 
+//! The whole point is that the thread works out which element is its job (mapping),
+//! then where that element actually lives in mewmory so it can read or write (linearizing).
 //! 
 //! Why x is the column: threads with neighbouring x read at the same time,
 //! and memory hands over neighbouring bytes in one go. With x -> column and row-major data,
