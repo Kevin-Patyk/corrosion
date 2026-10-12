@@ -253,6 +253,11 @@ mod kernels {
         // and we can just say "element i" instead.
         // The flattening hides that grouping from the code that handles the data.
         let idx = thread::index_1d();
+        // Mapping is always needed, even in a 1D context
+        // We are still mapping the blocks/threads to data, and we stil need the global index formula
+        // Each thread only knows which block + which position in the block and the global index formula
+        // turns that into "which piece of the data is mine."
+        // 1D skips linearizing because the mapping already gives a flat spot, so there is nothing to convert.
 
         // Indexing = how threads map onto data: the rule that turns a 
         // thread's built-n numbers (block, position in block) into WHICH
