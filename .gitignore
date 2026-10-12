@@ -43,3 +43,6 @@ Thumbs.db
 .oxide-artifacts/
 /*.ll
 /*.ptx
+
+# --- Project-specific files ---
+stage1-image-filters/output/

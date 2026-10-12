@@ -1,0 +1,10 @@
+[package]
+name = "stage1-matmul"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cuda-device.workspace = true
+cuda-host.workspace = true
+cuda-core.workspace = true
+image.workspace = true
