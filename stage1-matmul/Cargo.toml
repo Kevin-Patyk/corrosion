@@ -7,4 +7,3 @@ edition = "2024"
 cuda-device.workspace = true
 cuda-host.workspace = true
 cuda-core.workspace = true
-image.workspace = true

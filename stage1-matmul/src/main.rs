@@ -205,6 +205,11 @@ mod kernels {
         // Note: Both checks use WIDTH only because our matrix is square. For a non-square matrix, row would
         // be checked against the height instead.
         if let Some(c_idx) = thread::index_2d::<WIDTH>() {
+            // The GPU knows nothing about our matrix; a thread only knows its block and position numbers
+            // So the size has to come from us, and with `index_2d::<WIDTH>()`, it comes in as the constant `WIDTH`
+            // index_2d recomputes (row, col) itself from the thread's built in values, checks col < WIDTH, and returns the linearized spot
+            // row * WIDTH + col, wrapped as "one spot per thread" index
+
             // index_2d does NOT Check the row, so we do it. It must come before the loop:
             // a too-big row would just read past the end of A.
             if row < WIDTH {
@@ -251,6 +256,26 @@ mod kernels {
         }
     }
 }
+
+// 1. We launch a grid of blocks. Rounding up usually gives more threads than output elements.
+// 2. Each thread maps itself to an output spot `(row, col)`.
+// 3. `index_2D::<WIDTH>` checks `col < WIDTH`, and we check `row` ourselves. Threads that fail either check do nothing.
+// 4. The thread reads its inputs and calculates. We linearize the input spots ourselves.
+// 5. It writes the result to the output spot. That spot is the linearized index `index_2d` already returned, passed to `get_mut`.
+
+// Memory is always a flat line, so any 2D or 3D data has to be turned into a single spot before you can read or write it.
+// Rows, columns, and layers only exist in our heads; the linearizing formula translates them.
+// 1D needs no linearizing; the mapping already gives you a spot on the line, as in vector add
+// Sometimes a function does it for you: `index_2d` linearizes the output spot internally, but the formula is still the same
+
+// We need to linearize our inputs in the above example because the thread thinks in 2D, but `a[...]` only accepts one number.
+// The thread knows its output spot is (row, col).
+// From that it knows which inputs it wants, also as 2D positions: A at `(row, k)` and B at `(k, col)`.
+// The output row and col of the spot of C in the output tells us which row of A and col of B it needs.
+// But A and B sit in memory as flat lines, and `a[...]` takes a single spot number.
+// The thread's output spot `(row, col)` picks a whole row of A and whole column of B, and since A
+// and B are flat in memory, each element is linearized before reading: A `(row, k)` -> `row * WIDTH + k`,
+// B `(k, col)` -> `k + WIDTH + col`.
 
 // main returns a Result so we can use `?` below.
 // `Ok(())` = everything worked. `Err(...)` = something failed.
