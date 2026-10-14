@@ -199,7 +199,7 @@ mod kernels {
         // Our `row` and `col` variables are a separate copy of the same numbers, used for reading A and B.
         // We can't pass col in on purpose: a wrong col could give two threads the same spot in C.
         // Reading it from the GPU guarantees every thread a unique spot, which is what makes c.get_mut safe.
-        // It checks col < WIDTH, then computed row * WIDTH + col (linearizing).
+        // It checks col < WIDTH, then computes row * WIDTH + col (linearizing).
         // None = too far right: this thread does nothing.
         // Our thread has a (row, col) in the matrix C, first we check if the col is within then width, then the row
         // Note: Both checks use WIDTH only because our matrix is square. For a non-square matrix, row would
@@ -223,7 +223,12 @@ mod kernels {
                     // slices: one line of memory with no rows.
                     // To find "the element at (row, col)" we need the linearizing formula, every time.
                     // A slice only understands "give me spot number n", so we have to turn it into a spot ourselves
-                    // Both of these are the same formula (row * width + col), but we plug in different values
+                    // Because we launch in 2D, each thread gets a (row, col). Memory is flat, so that (row, col) is linearized
+                    // (by index_2d) to find the spot in C the thread will fill. To fill it, the thread computes a dot product
+                    // of row `row` of A and column `col` of B. A and B are flat too, so each position along that row and column 
+                    // is linearized to find where it sits in memory.
+                    // The position of (row, col) in C is used to determine which entire row is needed from A
+                    // and which entire row is needed from B.
                     sum += a[row * WIDTH + k] * b[k * WIDTH + col];
                     // Memory is always flat (A, B, C alike). What matters is what we know:
                     // - a (row, col) position -> needs linearizing formula
