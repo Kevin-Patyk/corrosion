@@ -107,13 +107,16 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig2D};
 // `cargo oxide run` runs from the crate folder, so these paths work as-is.
 //
 // `const` = a fixed value, known when the program BUILDS, never changes.
-// It has non memory spot of its own: the compiler pastes the value wherever
+// It has no memory spot of its own: the compiler pastes the value wherever
 // it's used. Names are UPPER_CASE convention, and the type must be written.
 //
 // `&str` = borrowed text: a view onto text stored somewhere else (here, inside the
 // program file itself). `&` means "borrowed, not owned". 
 // The owned version, which can grow, is `String`.
 const INPUT: &str = "images/piperi_sleeping.jpg";
+
+// Where the result goes. .png picks the PNG format (from the extension).
+const OUTPUT: &str = "images/gray.png";
 
 // Threads per block in each direction (16 x 16 = 256). Must match the 
 // `block = (16, 16, 1)` in the kernel's launch_contract: prepare checks it.
@@ -143,7 +146,7 @@ mod kernels {
     // #[launch_contract(...)]: the launch shape this kernel expects.
     // domain = 2 -> must be launched with a 2D config (LaunchConfig2D); checked at build time.
     // block = (16, 16, 1) -> blocks must be exactly 16 x 16 (x 1 deep); checked at RUN time by prepare_grayscale.
-    // Not checked: whether the grid covers the whole picture. That's on use.
+    // Not checked: whether the grid covers the whole picture. That's on us.
     #[launch_contract(domain = 2, block = (16, 16, 1))]
     pub fn grayscale(
         // Plain numbers: every thread gets the same copy. They come from the file, so they're
@@ -153,8 +156,7 @@ mod kernels {
         // Input: the color picture, 3 bytes per pixel. Read-only, so a 
         // plain slice: many thrads could read the same byte safely.
         rgb: &[u8],
-        // Output: 1 byte per pixel. Runtime2DIndex = "2D index whose row width"
-        // is given at launch" (not baked in like Index2D<WIDTH>)/
+        // Output: 1 byte per pixel. Runtime2DIndex = "2D index whose row width" is given at launch" (not baked in like Index2D<WIDTH>)
         // The host binds that width with RowWidth::new(&mut buf, width).
         mut gray: DisjointSlice<u8, thread::Runtime2DIndex>,
         // Runtime2DIndex means threads write to it with a (row, col) ticket, which
@@ -187,7 +189,13 @@ mod kernels {
         // index_2d_runtime gives Some(ticket) only if col < width (the width bound to `gray`).
         // It DOES NOT check row. The ticket holds this thread's (row, col); get mut turns it into 
         // row * width + col later.
+        // It is checking if this thread is within the limits of the output or not; if it is not, do nothing (skip).
         if let Some(gray_idx) = thread::index_2d_runtime(&gray) {
+            // index_2d_runtime(&gray) works out the thread's row and col itself, from the built-in values
+            // (block * block size + position), not from our `row` / `col` variables. It checks col < width
+            // (gray's width) but does NOT linearize: the ticket holds the plain (row, col). The flat spot
+            // row * width + col is only made later during writing, in gray.get_mut(ticket), using gray's own width.
+
             // 2b. Check the row ourselves. `as usize`: row is usize, height u32
             if row < height as usize {
                 // 3. Linearize the input: pixel number, then * 3 + channel
@@ -207,6 +215,11 @@ mod kernels {
                 // 5. Write: get_mut returns the ticket into this thread's spot
                 // (row * width + col; 1 value per pixel, so no * 3).
                 // `as u8` cuts off the decimals (117.5 -> 117).
+
+                // Linearizing happens whenever the thread touches memory:
+                // read (step 3): we find R G B in the flat color buffer ourselves
+                // write (step 5): get_mut finds the spot in the flat gray buffer, then *out = value puts the result there;
+                //      finding which spot the thread is writing to in memory
                 if let Some(out) = gray.get_mut(gray_idx) {
                     // `out` is a &mut u8: an address pointing into the gray buffer.
                     // `*out` = the value at that address (dereference),
@@ -221,6 +234,24 @@ mod kernels {
         }
     }
 }
+
+// 1. if let Some(gray_idx) = thread::index_2d_runtime(&gray): if the thread's col < width, take out the ticket and call it gray_idx.
+// 2. if row < height: a plain check, our own 
+// 3. if let Some(out) = gray.get_mut(gray_idx): if the ticket's spot (row * width + col) is inside gray_dev (below its length
+//      and col < width checked once more), take out a reference to that spot and call it out, then write there.
+
+// "Ticket" a value only index_2d_runtime can make. It holds this thread's (row, col) and proves
+// the thread passed the col < width check. get_mut only accepts a ticket, not a plain number
+// so a thread can only ever write to its own spot. 
+
+// The whole kernel in short:
+// - The host passes gray_dev (flat) bound to `width`, plus width and height.
+//      Input and output are the same picture size, so one width fits both.
+// - Every thread gets a (row, col), even off the picture.
+// - index_2d_runtime checks col < width; we check row < height ourselves.
+//      Off-picture threads stop here.
+// - The thread linearizes to READ its R, G, B from the flat color buffer, mixes them into one value
+//      then get_mut linearizes to find its spot in the flat gray_dev, and *out = value WRITEs it there.
 
 // main returns a Result: Ok(()) if everything worked, or an error.
 // `Box<dyn std::error::Error` = "any kind of error":
@@ -256,6 +287,143 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loaded {INPUT}: {width} x {height} pixels, {} values", rgb_host.len());
     // Pixel (0, 0) is spots 0, 1, 2 (its R, G, B).
     println!("Pixel (0, 0): R = {}, G = {}, B = {}", rgb_host[0], rgb_host[1], rgb_host[2]);
+
+    // 2. Open the GPU + get the queue 
+    //
+    // Context = our connection to one GPU. 0 = the first GPU on the machine.
+    // All setup (making buffers, loading kernels) goes through it.
+    let ctx = CudaContext::new(0)?;
+    // The queue that comes with the context. Copies and kernel launches are
+    // put on it and the GPU runs them IN ORDER, while the CPU carries on.
+    let stream = ctx.default_stream();
+
+    // 3. Copy the picture to the GPU, make the gray output buffer
+    //
+    // The GPU has its own memory, separate from the CPU's. Anything the kernel reads
+    // must be copied over first; a DeviceBuffer is a list that lives in GPU memory.
+    // We can't read it directly from the CPU.
+    //
+    // from_host: reserves GPU memory (right away), queues the copy, then WAITS until
+    // the bytes are on the GPU. &rgb_host lends the Vec, so we keep it for the CPU check layer.
+    // Type: DeviceBuffer<u8>.
+    let rgb_dev = DeviceBuffer::from_host(&stream, &rgb_host)?;
+
+    // zeroed: reserves GPU memory (right away) and queues filling it with 0.
+    // Does NOT wait. One byte per pixel, so width * height of them.
+    // `mut`: the kernel will write into it.
+    // (Limitation: a pixel the kernel forgets ro write stays 0 = block, so the
+    // CPU check can't tell a missing write from a truly black pixel).
+    let pixel_count = width as usize * height as usize;
+    let mut gray_dev: DeviceBuffer<u8> = DeviceBuffer::zeroed(&stream, pixel_count)?;
+
+    // 4. Load the kernels
+    //
+    // At build time, #[cuda_module] compiled our kernel to PTX (GPU code) and 
+    // packed it into this program. `load` handes that code to the GPU driver,
+    // which turns it into instructions for this exact GPU.
+    // `unsafe`: we promise the packed code really comes from this module;
+    // Rust can't check that itself. `module` holds the generated 
+    // `prepare_grayscale` and grayscale methods.
+    let module = unsafe { kernels::load(&ctx)? };
+    // `unsafe`: the packed GPU code (PTX) and the generated Rust methods are
+    // made separately at build time; they must match (same arguments, same order).
+    // Rust can't look inside of PTX to check, so we promise it.
+    // cargo oxide builds both from the same source, so in practice it holds.
+
+    // 5. Launch: a grid sized to the PICTURE, then queue the kernel
+    //
+    // The kernel's attributes say what's ALLOWED; this config is what ACTUALLY
+    // happens this run. Round UP, separately per direction:
+    // blocks across cover the width (columns), blocks down the height (rows).
+    // For 1280 x 591: 80 x 37 blocks; the bottom blocks row hangs one over.
+    let blocks_x = width.div_ceil(BLOCK);
+    let blocks_y = height.div_ceil(BLOCK);
+    // LaunchConfig2D::new(grid, block, shared_mem):
+    // grid = (blocks across, blocks down) from the picture's size
+    // block = (threads across, threads down) per block; z is 1
+    // shared_mem = bytes of shared memory per block (on-chip block memory); we use none, so 0.
+    let config = LaunchConfig2D::new((blocks_x, blocks_y), (BLOCK, BLOCK), 0);
+    println!("Grid: {blocks_x} x {blocks_y} blocks of {BLOCK} x {BLOCK} threads");
+
+    // prepare_grayscale (generated by #[cuda_module]) checks the config against the kernel's 
+    // launch_contract: 2-dimensional launch with blocks exactly 16 x 16 x 1, and within the GPU's limits. 
+    // Errors come back here, before any launch.
+    // NOT checked: does this grid cover the picture? That's on us.
+    let prepared = module.prepare_grayscale(config)?;
+
+    // grayscale (generated) = the launcher. First the queue and the prepared shape,
+    // then the kernel's arguments in the same order as its parameters:
+    //      width, height -> plain u32s, every thread gets the same copy
+    //      &rgb_dev -> the kernel's `rgb: &[u8]` (borrowed, read only)
+    //      RowWidth::new -> the kernel's `gray`: the buffer (&mut: it gets written) + its row
+    //          width, so index_2d_runtime and get_mut know the width.
+    // It also checks the queue belongs to the same GPU as the module.
+    // This only QUEUES the kernel and returns at once: the GPU runs it later.
+    // A crash inside the kernel shows up at the next waiting call.
+    module.grayscale(&stream, &prepared, width, height, &rgb_dev, RowWidth::new(&mut gray_dev, width))?;
+    println!("Kernel queued");
+
+    // gray_dev vs width: different things
+    //      width = pixels in ONE row (1280), used for col < width check and linearizing
+    //      gray_dev.len() = values in the WHOLE gray bufer, 1 per pixel
+    // The buffer is flat and only knows its total length. width says
+    // where each row starts, so the col < width check and get_mut's row * width + col need it.
+    // RowWidth::new(&mut gray_dev, width) joins thw two for the kernel. The length is only a safety net
+    // (get_mut checks the spot < gray_dev.len()).
+
+    // 6. Copy the gray picture back
+    //
+    // to_host_vec queues the copy back on the same queue, then WAITS for everything before it
+    // to finish, including our kernel. So this is the first line where the kernel has really run,
+    // and where a crash inside it would show up as an error.
+    let gray_host: Vec<u8> = gray_dev.to_host_vec(&stream)?;
+
+    // 7. Check against the same formula on the CPU
+    //
+    // A plain loop over every pixel: no threads, no (row, col) needed,
+    // because pixel i's R, G, B sit at i * 3, i * 3 + 1, i * 3 + 2.
+    // We allow a difference of 1: the GPU can round the mix slightly differently 
+    // (it may do a multiply and add in one step), and 
+    // `as u8` cutting off decimals can then land 1 lower on one side.
+    let mut mismatches = 0;
+    for i in 0..pixel_count {
+        let r = rgb_host[i * 3] as f32;
+        let g = rgb_host[i * 3 + 1] as f32;
+        let b = rgb_host[i * 3 + 2] as f32;
+        let expected = (0.21 * r + 0.72 * g + 0.07 * b) as u8;
+
+        // abs_diff: the distance between two numbers, never negative
+        // (u8 can't hold negatives, so a - b could fail; this can't).
+        if gray_host[i].abs_diff(expected) > 1 {
+            // Print only the first 5, so a total failure doesn't flood
+            // the terminal. i % width = col, i / width = row.
+            if mismatches < 5 {
+                let (row, col) = (i / width as usize, i % width as usize);
+                println!(
+                    "Mismatch at pixel ({row}, {col}): GPU {}, CPU {expected}",
+                    gray_host[i]
+                );
+            }
+            mismatches += 1;
+        }
+    }
+
+    if mismatches == 0 {
+        println!("SUCCESS: all {pixel_count} pixels match");
+    } else {
+        println!("FAILED: {mismatches} of {pixel_count} pixels differ");
+    }
+
+    // 8. Save the gray picture
+    //
+    // from_raw wraps our flat bytes as a picture: width x height, 1 byte per pixel,
+    // row-major (the same layout the kernel wrote). It returns None if the Vec is too
+    // short for the width * height, so we turn that into an
+    // error with ok_or and `?` passes it out ouf main.
+    let gray_image = GrayImage::from_raw(width, height, gray_host)
+        .ok_or("gray buffer has the wrong size")?;
+    gray_image.save(OUTPUT)?;
+    println!("Saved {OUTPUT}");
 
     Ok(())
 }
