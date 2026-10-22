@@ -139,9 +139,9 @@
     {
       "id": "ACShYCyMcgm0MuVQyug7V",
       "type": "arrow",
-      "x": 695.701759,
+      "x": 694.1986357617083,
       "y": 204,
-      "width": 217.29824099999996,
+      "width": 214.71291854198182,
       "height": 84,
       "angle": 0,
       "strokeColor": "#1e1e1e",
@@ -158,11 +158,11 @@
         "type": 2
       },
       "seed": 1732077591,
-      "version": 149,
-      "versionNonce": 2118369305,
+      "version": 185,
+      "versionNonce": 800212472,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1792501672495,
+      "updated": 1792669448843,
       "link": null,
       "locked": false,
       "points": [
@@ -171,7 +171,7 @@
           0
         ],
         [
-          217.29824099999996,
+          214.71291854198182,
           84
         ]
       ],
@@ -291,9 +291,9 @@
     {
       "id": "eS_gHKTXPzFpUwq9WFR0N",
       "type": "text",
-      "x": 757.2806624355471,
+      "x": 767.7606734218753,
       "y": 295.370443,
-      "width": 312.73980712890625,
+      "width": 291.77978515625,
       "height": 75,
       "angle": 0,
       "strokeColor": "#1e1e1e",
@@ -308,8 +308,8 @@
       "index": "a8",
       "roundness": null,
       "seed": 1784860217,
-      "version": 318,
-      "versionNonce": 1169690425,
+      "version": 353,
+      "versionNonce": 1413588216,
       "isDeleted": false,
       "boundElements": [
         {
@@ -317,16 +317,16 @@
           "type": "arrow"
         }
       ],
-      "updated": 1792501672232,
+      "updated": 1792669448843,
       "link": null,
       "locked": false,
-      "text": "PTX (GPU code)\n\nexpects: width, height, rgb, gray",
+      "text": "Rust methods (CPU code)\n\nsends: width, height, rgb, gray",
       "fontSize": 20,
       "fontFamily": 5,
       "textAlign": "center",
       "verticalAlign": "top",
       "containerId": null,
-      "originalText": "PTX (GPU code)\n\nexpects: width, height, rgb, gray",
+      "originalText": "Rust methods (CPU code)\n\nsends: width, height, rgb, gray",
       "autoResize": true,
       "lineHeight": 1.25
     },
