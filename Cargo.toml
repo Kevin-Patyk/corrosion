@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["stage0-vec-add", "stage1-matmul"]
+members = ["stage0-vec-add", "stage1-matmul", "stage2-image-filters"]
 
 [workspace.dependencies]
 # Device side: what kernels can use (thread indexing, DisjointSlice, #[kernel]).

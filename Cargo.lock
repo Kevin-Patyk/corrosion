@@ -693,6 +693,15 @@ dependencies = [
  "cuda-core",
  "cuda-device",
  "cuda-host",
+]
+
+[[package]]
+name = "stage2-image-filters"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
  "image",
 ]
 

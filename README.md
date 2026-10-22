@@ -11,8 +11,8 @@ Processors (PMPP) as the theory track.
 | Stage | Project                                | Stack               |
 |-------|----------------------------------------|---------------------|
 | 0     | Hello, buffer                          | cuda-oxide          |
-| 1     | Image filters                          | cuda-oxide + image  |
-| 2     | Path tracer                            | cuda-oxide + image  |
+| 1     | Naive matmul                           | cuda-oxide          |
+| 2     | Grayscale image                        | cuda-oxide + image  |
 | 3     | Bandwidth benchmark, histogram         | cuda-oxide          |
 | 4     | Reduction, scan, radix sort            | cuda-oxide          |
 | 5     | N-body                                 | cuda-oxide + image  |
