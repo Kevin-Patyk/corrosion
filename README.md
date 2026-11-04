@@ -21,6 +21,13 @@ Processors (PMPP) as the theory track.
 | 8     | Baby PyTorch                           | cuda-oxide          |
 | 9     | Reading PTX, the compiler, drivers     | —                   |
 
+Side projects, between stages:
+
+| Crate         | What it does                                                  | After    |
+|---------------|---------------------------------------------------------------|----------|
+| `filler-ch4`  | Device query (SM count, the four per-SM pools) and the PMPP   | PMPP ch. 4 |
+|               | ch. 4 arithmetic: blocks, warps, waves, occupancy, data edge  |          |
+
 Requires an NVIDIA GPU, CUDA toolkit 13.0+, clang-21 and cargo-oxide.
 The pinned nightly toolchain is set in `rust-toolchain.toml`; run
 `cargo oxide doctor` to check your setup.
