@@ -101,6 +101,17 @@ fn launch_report(card: &Card, n: u32, block: u32) {
     // Padding happens in every block and comes from the block-size choice; extras from div_ceil happen
     // in the last block only and come from the data size. The first is always avoidable, the second usually isn't.
 
+    // Why a block size is not a multiple of 32 is a mistake (e.g. 48):
+    // The hardware cuts the block into warps of 32: warp 0 = 32 real threads,
+    // warp 1 = 16 real + 16 padding. Nothing breaks; results are correct.
+    // The cost is waste, charged twice, in EVERY block of the launch:
+    // 1. Cores: each instruction of warp 1 goes to 32 cores, 16 do nothing.
+    // 2. Pools: the SM charges the block 64 thread seats (and registers), not 48.
+    //      The pools fill with padded threads, so fewer USEFUL threads are resident per SM
+    //      (my card: 24 blocks x 48 = 1152 of 1526 seats useful),
+    //      and with bigger sizes (480 vs 512), fewer blocks fit as well.
+    // Fix: A multiple of 32 (128, 256, 512). Same cost, no padding.
+
     // As a note, processing blocks per SM x SMs = warps issuing at once. 
     // The warps resident, taking turns on those dispatchers, is the bigger number from the pools.
     let warps_per_block = block.div_ceil(card.warp_size);
